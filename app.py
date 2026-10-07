@@ -1,181 +1,119 @@
-import os, re, json, textwrap
-from pathlib import Path
+import re
 import streamlit as st
 
 st.set_page_config(page_title="Finance DBT Copilot", page_icon="🏦", layout="wide")
-
 st.title("🏦 Finance DBT Copilot")
-st.caption("Screenshot-first assistant for dbt project work. Suggestions require human review.")
+st.caption("Offline dbt workbench. No AI or API key required.")
 
-# ---------- helpers ----------
-def ai(prompt, context=""):
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        return None, "AI is not configured. Set OPENAI_API_KEY in your environment."
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=key)
-        system = """You are a senior dbt + Snowflake engineer supporting a finance data project.
-Be conservative. Never invent project conventions or unseen dependencies.
-Clearly separate facts from assumptions.
-For financial transformations, explicitly consider grain, duplicates, NULLs, precision/scale,
-currency, date/time logic, late-arriving data, reconciliation, and downstream impact.
-Do not execute or recommend production writes without human review."""
-        r = client.responses.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-5.6"),
-            input=[
-                {"role":"system","content":system},
-                {"role":"user","content":f"CONTEXT:\n{context}\n\nREQUEST:\n{prompt}"}
-            ]
-        )
-        return r.output_text, None
-    except Exception as e:
-        return None, str(e)
+def cols(value):
+    return [x.strip() for x in re.split(r"[,\\n]+", value or "") if x.strip()]
 
-def show_ai(prompt, context):
-    answer, err = ai(prompt, context)
-    if answer:
-        st.markdown(answer)
-    else:
-        st.warning(err)
-        st.info("You can still use the structured checklists without AI.")
+def incremental_code(strategy, key):
+    s = strategy if strategy != "Unknown" else "merge"
+    k = cols(key)
+    uk = "'" + k[0] + "'" if len(k) == 1 else (str(k) if k else "'REPLACE_WITH_UNIQUE_KEY'")
+    return """{{ config(
+    materialized='incremental',
+    incremental_strategy='""" + s + """',
+    unique_key=""" + uk + """
+) }}
 
-def extract_text(upload):
-    if not upload:
-        return ""
-    if upload.type.startswith("text/") or upload.name.endswith((".sql",".yml",".yaml",".md",".txt")):
-        return upload.getvalue().decode("utf-8", errors="ignore")
-    return f"[Image uploaded: {upload.name}. Use the AI vision-capable environment to analyze this screenshot.]"
+select *
+from {{ ref('source_model') }}
 
-# ---------- sidebar ----------
+{% if is_incremental() %}
+-- Add your project-approved lookback/incremental filter here.
+{% endif %}"""
+
+def quality_tests(grain, important):
+    c=cols(important); out=[]
+    if grain: out.append("Grain: "+grain)
+    if c:
+        out.append("Review NOT NULL for required columns: "+", ".join(c))
+        out.append("Apply UNIQUE only where it matches the declared grain.")
+    out += ["Relationships: validate foreign-key-style dimensions.","Accepted values: validate controlled status/type/currency fields.","Financial: check precision/scale, signs, rounding and currency consistency.","Dates: check invalid/future dates and timezone/business-date rules.","Reconciliation: compare source/output row counts and important financial totals."]
+    return out
+
 with st.sidebar:
     st.header("Project Context")
-    st.write("Add only information approved by your company.")
-    upload = st.file_uploader("Screenshot / SQL / YAML", type=["png","jpg","jpeg","webp","sql","yml","yaml","txt","md"])
-    pasted = st.text_area("Paste project code or error", height=180)
-    task = st.text_area("Task / Jira requirement", height=120, placeholder="Example: Add latest transaction status to the account model.")
-    context = extract_text(upload) + "\n\n" + pasted + "\n\nTASK:\n" + task
+    st.caption("Inputs are used only for the current app session. Nothing is committed to GitHub.")
+    st.file_uploader("Screenshot / SQL / YAML",type=["png","jpg","jpeg","webp","sql","yml","yaml","txt","md"])
+    st.text_area("Paste project code or error",height=160)
+    st.text_area("Task / Jira requirement",height=100)
 
-    st.divider()
-    st.caption("🔒 No repository connection. You control what is shared.")
-    st.caption("⚠️ Do not provide passwords, tokens, customer PII or confidential data unless your company explicitly permits it.")
+tabs=st.tabs(["🔄 Incremental","🧩 Macros","📸 Snapshots","🧪 Data Quality","🌳 Lineage & Impact"])
 
-tabs = st.tabs([
-    "🔄 Incremental",
-    "🧩 Macros",
-    "📸 Snapshots",
-    "🧪 Data Quality",
-    "🌳 Lineage & Impact"
-])
-
-# ---------- incremental ----------
 with tabs[0]:
-    st.header("🔄 Incremental Copilot")
-    st.write("Use this before changing or creating an incremental model.")
-    c1,c2 = st.columns(2)
-    with c1:
-        grain = st.text_input("Business grain", placeholder="One row per account + business_date")
-        unique_key = st.text_input("Unique key", placeholder="account_id")
-        strategy = st.selectbox("Incremental strategy", ["Unknown", "merge", "append", "delete+insert"])
-    with c2:
-        late = st.checkbox("Late-arriving data possible")
-        updates = st.checkbox("Existing records can be corrected")
-        deletes = st.checkbox("Deletes are possible")
-        currency = st.checkbox("Money / multi-currency fields involved")
+    st.header("🔄 Incremental Workbench")
+    st.write("Generate a starting configuration and identify design risks.")
+    grain=st.text_input("Business grain",placeholder="One row per account + business_date")
+    key=st.text_input("Unique key",placeholder="account_id")
+    strategy=st.selectbox("Incremental strategy",["Unknown","merge","append","delete+insert"])
+    late=st.checkbox("Late-arriving data possible")
+    updates=st.checkbox("Existing records can be corrected")
+    deletes=st.checkbox("Deletes are possible")
+    currency=st.checkbox("Money / multi-currency fields involved")
+    if st.button("Generate Incremental Design"):
+        st.subheader("model.sql starter"); st.code(incremental_code(strategy,key),language="sql")
+        if not grain: st.warning("Define the business grain.")
+        if not key and strategy!="append": st.warning("Define a reliable unique key.")
+        if strategy=="append" and (updates or deletes): st.warning("Append may be unsafe when records are corrected or deleted.")
+        if late: st.warning("Late-arriving data needs a documented lookback/capture strategy.")
+        if currency: st.warning("Validate monetary precision, scale, currency and rounding.")
+        st.info("Replace source_model and add the incremental filter according to your project rules.")
 
-    if st.button("Analyze Incremental Logic"):
-        checklist = f"""
-Grain: {grain or 'Not provided'}
-Unique key: {unique_key or 'Not provided'}
-Strategy: {strategy}
-Late arriving data: {late}
-Corrections: {updates}
-Deletes: {deletes}
-Financial/currency data: {currency}
-Code/context:
-{context}
-"""
-        show_ai("""Review this incremental design. Identify likely duplicate, late-data, merge,
-full-refresh, delete, precision, and reconciliation risks. If enough information exists,
-propose robust dbt/Snowflake logic and tests. List assumptions explicitly.""", checklist)
-
-# ---------- macros ----------
 with tabs[1]:
-    st.header("🧩 Macro Copilot")
-    operation = st.selectbox("Macro task", [
-        "Create a macro",
-        "Explain an existing macro",
-        "Convert SQL into a macro",
-        "Debug a macro",
-        "Review whether a macro is needed",
-        "Refactor a macro"
-    ])
-    macro_request = st.text_area("Describe the macro task", height=140)
-    if st.button("Run Macro Copilot"):
-        prompt = f"""Macro operation: {operation}
-User request: {macro_request}
-Provide:
-1. recommendation
-2. macro code when appropriate
-3. example usage
-4. where it should live
-5. edge cases
-6. finance-specific risks
-7. tests/checks
-Do not create a macro merely for one-off logic."""
-        show_ai(prompt, context)
+    st.header("🧩 Macro Workbench")
+    operation=st.selectbox("Macro task",["Create a macro","Convert SQL into a macro","Debug a macro","Review whether a macro is needed","Refactor a macro"])
+    name=st.text_input("Macro name",placeholder="format_amount")
+    request=st.text_area("What should it do?",height=120)
+    if st.button("Generate Macro Template"):
+        macro=name.strip() or "my_macro"
+        st.code("""{% macro """+macro+"""(column_name) %}
+    -- Add reusable parameterized logic here.
+    {{ column_name }}
+{% endmacro %}""",language="jinja")
+        st.write("Checklist: put reusable macros in the project's macros/ directory; avoid macros for one-off SQL; test representative inputs and edge cases.")
+        if request: st.write("Requested behavior:",request)
 
-# ---------- snapshots ----------
 with tabs[2]:
-    st.header("📸 Snapshot Copilot")
-    st.write("For historical-change and slowly-changing-record problems.")
-    snapshot_type = st.selectbox("What are you trying to track?", [
-        "Unknown",
-        "Row changes over time",
-        "Status/history changes",
-        "Financial/account attribute history",
-        "Other"
-    ])
-    key = st.text_input("Business key", placeholder="account_id")
-    change_col = st.text_input("Timestamp/change column", placeholder="updated_at")
-    if st.button("Analyze Snapshot Design"):
-        show_ai(f"""Evaluate this snapshot design:
-Type: {snapshot_type}
-Business key: {key}
-Change/timestamp column: {change_col}
-Recommend an appropriate dbt snapshot strategy, explain the generated historical fields,
-and identify risks around late updates, corrections, deletes, timestamps and finance reporting.
-Context: {context}""", context)
+    st.header("📸 Snapshot Workbench")
+    st.write("Generate a standard dbt snapshot starting point.")
+    key2=st.text_input("Business key",placeholder="account_id")
+    updated=st.text_input("Updated timestamp",placeholder="updated_at")
+    if st.button("Generate Snapshot Template"):
+        k=key2.strip() or "business_key"; u=updated.strip() or "updated_at"
+        st.code("""{% snapshot account_history %}
 
-# ---------- quality ----------
+{{ config(
+    target_schema='snapshots',
+    unique_key='"""+k+"""',
+    strategy='timestamp',
+    updated_at='"""+u+"""'
+) }}
+
+select *
+from {{ ref('source_model') }}
+
+{% endsnapshot %}""",language="sql")
+        st.warning("Verify the key is unique at the snapshot grain and the timestamp is reliable.")
+
 with tabs[3]:
-    st.header("🧪 Data Quality Copilot")
-    st.write("Generate a practical test plan instead of blindly adding generic tests.")
-    model_grain = st.text_input("Model grain", key="quality_grain", placeholder="One row per transaction")
-    important_cols = st.text_area("Important columns", placeholder="transaction_id\naccount_id\namount\ncurrency\ntransaction_date")
+    st.header("🧪 Data Quality Workbench")
+    grain2=st.text_input("Model grain",key="qgrain",placeholder="One row per transaction")
+    important=st.text_area("Important columns",key="qcols",placeholder="transaction_id\\naccount_id\\namount\\ncurrency\\ntransaction_date")
     if st.button("Generate Test Plan"):
-        show_ai(f"""Create a dbt data-quality test plan for this finance model.
-Grain: {model_grain}
-Columns:
-{important_cols}
-Include appropriate generic/custom tests and explain why each matters.
-Pay special attention to uniqueness, not-null, accepted values, relationships, monetary
-precision, currency consistency, date validity, duplicates, reconciliation and row-count anomalies.
-Do not invent business rules; mark assumptions.""", context)
+        for x in quality_tests(grain2,important): st.write("☐ "+x)
+        st.subheader("schema.yml starter")
+        st.code("version: 2\\n\\nmodels:\\n  - name: your_model\\n    columns:\\n"+''.join("      - name: "+c+"\\n        # Add approved tests\\n" for c in cols(important)),language="yaml")
 
-# ---------- lineage ----------
 with tabs[4]:
-    st.header("🌳 Lineage & Impact Copilot")
-    st.write("Use before changing an existing model, macro or important column.")
-    changed_item = st.text_input("What are you changing?", placeholder="dim_account.amount")
-    change = st.text_area("What change are you considering?", height=120)
-    if st.button("Analyze Impact"):
-        show_ai(f"""Assess the likely impact of this dbt change.
-Changed item: {changed_item}
-Proposed change: {change}
-Identify upstream/downstream dependencies that can be established from the supplied context,
-what must be verified manually, tests to run, and potential finance/reporting risks.
-Never claim complete lineage unless the context proves it.""", context)
+    st.header("🌳 Lineage & Impact Workbench")
+    item=st.text_input("What are you changing?",placeholder="dim_account.amount")
+    change=st.text_area("What change are you considering?",height=100)
+    if st.button("Generate Impact Checklist"):
+        for x in ["Search dbt refs and sources for direct dependencies.","Search downstream models, exposures and reports.","Compile affected models and inspect generated SQL.","Run affected model tests.","Compare row counts and important financial totals before/after.","Check incremental and full-refresh behavior.","Check schema/column compatibility for downstream consumers."]: st.write("☐ "+x)
+        st.info("Complete lineage cannot be inferred without your project/catalog. This is a checklist, not an automatic lineage scan.")
 
 st.divider()
 st.subheader("🛡️ Finance safety checklist")
