@@ -4,34 +4,6 @@ import streamlit as st
 
 st.set_page_config(page_title="Finance DBT Copilot", page_icon="🏦", layout="wide")
 
-# ---------- access control ----------
-# This app is intended for the owner's personal use.
-# Configure the authorized email in Streamlit Secrets:
-# ALLOWED_EMAIL = "your-login-email@example.com"
-#
-# Streamlit's native login is used so no password is stored in this repository.
-if "ALLOWED_EMAIL" not in st.secrets:
-    st.error("App access is not configured yet. Add ALLOWED_EMAIL in Streamlit Secrets.")
-    st.stop()
-
-if not st.user.is_logged_in:
-    st.title("🔐 Finance DBT Copilot")
-    st.caption("Private workspace. Sign in with your authorized account to continue.")
-    if st.button("Sign in"):
-        st.login()
-    st.stop()
-
-allowed_email = str(st.secrets["ALLOWED_EMAIL"]).strip().lower()
-user_email = str(getattr(st.user, "email", "") or "").strip().lower()
-
-if not user_email or user_email != allowed_email:
-    st.error("🚫 Access denied")
-    st.write("This Finance DBT Copilot is restricted to its authorized user.")
-    if st.button("Sign out"):
-        st.logout()
-    st.stop()
-
-
 st.title("🏦 Finance DBT Copilot")
 st.caption("Screenshot-first assistant for dbt project work. Suggestions require human review.")
 
